@@ -1,0 +1,11 @@
+Performance counter stats for './image_filter ../data/medium.pgm output.pgm blur':
+
+           309,188      cache-references                                                      
+           182,862      cache-misses              #   59.14% of all cache refs         
+         4,653,667      L1-dcache-load-misses                                                 
+            19,514      LLC-load-misses                                                       
+
+       0.107302743 seconds time elapsed
+
+       0.104199000 seconds user
+       0.003005000 seconds sys

@@ -1,0 +1,107 @@
+Part A: The Slow Log Analyzer
+
+Task 1.1: gprof Profiling
+1. Top 3 functions by activity (based on gprof report):
+   - parse_line (100% of sampled time, 0.01s, 100,000 calls)
+   - search_messages (0.00s but 3 calls - each searching 100,000 entries)
+   - count_log_levels (0.00s but processes all 100,000 entries)
+   (Note: gprof's sampling only captured parse_line due to its dominance. The others appear with 0.00s but are still active based on call counts.)
+
+Task 1.2: perf Profiling
+1. Comparison with gprof:
+   - gprof reported 0.01s execution time and failed to show library overhead.
+   - perf successfully captured the profile, showing that 'parse_line' takes ~46.5% of execution time.
+   - perf revealed that the time is actually spent in library functions like '__strstr_sse2_unaligned' (17.6%), '__strncpy_evex' (9.7%), and '_IO_fgets' (7.5%), which gprof missed because it focuses on user-space instrumentation.
+
+Task 1.3: Callgrind Analysis
+1. Hidden hotspots revealed:
+   - Callgrind highlighted the heavy cost of 'malloc' and 'free' occurring inside 'parse_line' for every single line of the log. 
+   - It also showed the high instruction count in 'count_log_levels' due to the nested 'strcmp' loop. 
+   - These structural inefficiencies were less obvious in the flat sampling view of perf but very clear in the instruction-count based call graph.
+
+Task 1.4: Flame Graph Analysis
+1. Flame graph annotation:
+   - The widest section at the base is 'main', which calls the primary functions.
+   - The largest "tower" is 'parse_line' (taking ~50% width), showing it dominates execution.
+   - Within 'parse_line', sub-towers show library calls: '__strncpy_evex', 'malloc' (~9%), 'free', and string tokenization functions (__strcspn_sse42, __strspn_sse42).
+   - A second significant tower is from 'search_messages' which calls '__strstr_sse2_unaligned' (~19%).
+   - 'count_log_levels' accounts for ~15% with '__strcmp_evex' calls.
+   - The flame graph visually confirms that string operations and memory allocation inside loops are the primary bottlenecks.
+
+Task 1.5: Amdahl's Law Analysis
+1. Percentage of time in main hotspot (parse_line): ~50% (P = 0.50)
+   (From flamegraph: 49.65%, from perf report: ~46-48%)
+2. Maximum theoretical speedup with 10x optimization (S = 10):
+   Speedup = 1 / ((1 - P) + (P / S))
+           = 1 / ((1 - 0.50) + (0.50 / 10))
+           = 1 / (0.50 + 0.05)
+           = 1 / 0.55
+           = ~1.82x
+
+Part B: The Sluggish Image Filter
+
+Task 2.1: Cache Miss Analysis
+1. Cache miss statistics:
+   - Cache misses: 182,862
+   - Cache miss rate: 59.14%
+2. Worst function: 'apply_blur_slow'
+   - Reason: The function accesses the image pixels in column-major order (x in outer loop, y in inner loop), but the C array is stored in row-major order. This causes a cache miss on almost every pixel access.
+
+Task 2.2: Call Graph and Hidden Hotspot
+1. Hidden hotspot: 'init_gaussian_kernel'
+   - Reason: This initialization function is called inside the pixel loop (by 'apply_blur_kernel'). The kernel values are constant, but the program recomputes them millions of times (once per pixel), causing massive redundant work.
+
+Task 2.3: Scaling Analysis
+1. Execution Times:
+   - Small (256x256): 0.01s
+   - Medium (1024x1024): 0.18s
+   - Large (4096x4096): 2.61s
+2. Linearity:
+   - Performance is roughly linear or slightly better than linear between Medium and Large (16x pixels, ~14.5x time). However, the jump from Small to Medium shows significant overhead. The 59% cache miss rate on Medium suggests that once the image exceeds L2/L3 cache size, memory bandwidth becomes the bottleneck, preventing perfect scaling.
+
+Task 2.4: Amdahl's Law Analysis
+1. Time in cache-unfriendly loop (init + blur): ~80% (P = 0.8)
+2. Speedup with 5x optimization (S = 5):
+   Speedup = 1 / ((1 - 0.8) + (0.8 / 5))
+           = 1 / (0.2 + 0.16)
+           = 1 / 0.36
+           = ~2.78x
+
+Task 2.5: Combined ROI Analysis
+1. Better ROI: Part B (Image Filter).
+   - Part B's hotspot accounts for ~80% of total time compared to Part A's ~50%.
+   - The issues in Part B (redundant calculation and bad memory access) are algorithmically easier to fix for massive gains than the library-heavy string parsing in Part A.
+
+2. Theoretical speedup with 4-core parallelization (perfect scaling):
+   - Part A: P = 0.50 (parallelizable portion), S = 4
+     Speedup = 1 / ((1 - 0.50) + (0.50 / 4))
+             = 1 / (0.50 + 0.125)
+             = 1 / 0.625
+             = 1.6x
+   - Part B: P = 0.8 (parallelizable portion), S = 4
+     Speedup = 1 / ((1 - 0.8) + (0.8 / 4))
+             = 1 / (0.2 + 0.2)
+             = 1 / 0.4
+             = 2.5x
+   - Conclusion: Part B benefits more from parallelization due to its higher parallelizable fraction.
+
+Task 3: Sampling vs Instrumentation
+
+1. Overhead Comparison:
+   - perf (Sampling): Very low overhead (~1-5%), minimal impact on execution speed.
+   - gprof (Hybrid - sampling for time, instrumentation for call counts): Medium overhead (~10-30%), requires recompilation with -pg flag, can distort small function timings.
+   - Callgrind (Full Instrumentation/Emulation): Very high overhead (50x-100x slowdown), unsuitable for real-time applications but provides exact instruction counts.
+
+2. Detection Differences:
+   - perf samples the CPU state periodically. It captures everything (including kernel/libraries) but can miss short, infrequent events due to sampling aliasing.
+   - gprof uses sampling for timing but can miss fast functions entirely (as seen with 0.00s times). It also cannot profile library code.
+   - Callgrind counts every single instruction. It finds logic errors (like calling a function too many times) effectively but doesn't reflect true "wall clock" bottlenecks (like I/O or blocked time).
+
+3. Tool Selection:
+   - Sampling (perf): Use for production systems, checking overall system health, analyzing kernel/OS interactions, or when low overhead is critical.
+   - Instrumentation (gprof): Use when you need call counts and a simple call graph, and can tolerate recompilation.
+   - Instrumentation (Callgrind): Use for algorithmic analysis, finding redundant calls, optimizing instruction counts, or when detailed call graphs are needed.
+
+4. Short Functions:
+   - In Sampling: Very short functions often disappear (show 0% time) if they execute entirely between two samples.
+   - In Instrumentation: They are recorded accurately with exact call counts, revealing if a tiny function is being called billions of times unnecessarily.

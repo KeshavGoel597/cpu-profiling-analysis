@@ -1,0 +1,12 @@
+# Profiling outputs
+*.data
+perf.data*
+cachegrind.out.*
+callgrind.out.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
